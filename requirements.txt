@@ -1,0 +1,10 @@
+langchain
+langchain-community
+langchain-openai
+langchain-ollama
+langchainhub
+pydantic>=2.0
+pydantic-settings
+python-dotenv
+requests
+gradio
