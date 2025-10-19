@@ -9,7 +9,9 @@ import gradio as gr
 import os
 
 from langchain.chains import ConversationalRetrievalChain
+from langchain_community.retrievers import BM25Retriever
 from langchain_community.vectorstores import FAISS
+from langchain.retrievers import EnsembleRetriever
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain.schema import HumanMessage, AIMessage
 from langchain_core.output_parsers import StrOutputParser
@@ -39,9 +41,27 @@ def build_local_agent() -> Tuple[ConversationalRetrievalChain, ChatOllama]:
     embeddings_model = settings.embedding_model
     print(f"[agent] Connecting to Ollama embeddings model '{embeddings_model}' (this may take a moment) ...", flush=True)
     embeddings = OllamaEmbeddings(model=embeddings_model)
-    print("[agent] Building FAISS vector store ...", flush=True)
-    vector_store = FAISS.from_texts(chunks, embeddings)
-    retriever = vector_store.as_retriever()
+
+    print("[agent] Building FAISS (dense) index ...", flush=True)
+    vector_store = FAISS.from_documents(chunks, embeddings)
+    dense = vector_store.as_retriever(
+        search_type="mmr",
+        search_kwargs={
+            "k": 8,
+            "fetch_k": 40,
+            "lambda_mult": 0.3,
+        },
+    )
+
+    print("[agent] Building BM25 (sparse) retriever ...", flush=True)
+    bm25 = BM25Retriever.from_documents(chunks)
+    bm25.k = 8
+
+    print("[agent] Combining dense + sparse into EnsembleRetriever ...", flush=True)
+    retriever = EnsembleRetriever(
+        retrievers=[bm25, dense],
+        weights=[0.45, 0.55],
+    )
 
     llm_model = settings.chat_model
     print(f"[agent] Spinning up ChatOllama model '{llm_model}' ...", flush=True)
@@ -52,7 +72,28 @@ def build_local_agent() -> Tuple[ConversationalRetrievalChain, ChatOllama]:
     return chain, llm
 
 qa, llm = build_local_agent()
-web_search = WebSearchAgent() if settings.search_enabled else None
+web_search_agent: WebSearchAgent | None = None
+_web_search_error: str | None = None
+
+
+def _ensure_web_search_agent() -> WebSearchAgent | None:
+    """Instantiate the web search agent if needed, caching failures."""
+    global web_search_agent, _web_search_error
+    if web_search_agent is not None:
+        return web_search_agent
+    if _web_search_error is not None:
+        return None
+    try:
+        web_search_agent = WebSearchAgent()
+        return web_search_agent
+    except Exception as exc:  # pragma: no cover - external dependency
+        _web_search_error = str(exc)
+        print(f"[agent] Web search unavailable: {exc}", flush=True)
+        return None
+
+
+if settings.search_enabled:
+    _ensure_web_search_agent()
 
 print("Local document QA agent ready.")
 
@@ -125,7 +166,7 @@ def _rewrite_for_search(question: str, history_text: str) -> str:
     return candidate.strip() or question
 
 
-def respond(message, history):
+def respond(message, history, use_web_search: bool):
     """
     Gradio callback: given latest user message and full chat history, return model reply.
     """
@@ -135,15 +176,20 @@ def respond(message, history):
     local_answer = qa_response.get("answer") if isinstance(qa_response, dict) else qa_response
     sources = qa_response.get("source_documents", []) if isinstance(qa_response, dict) else []
 
-    if not settings.search_enabled or web_search is None:
+    if not use_web_search:
         return local_answer  # already a string thanks to StrOutputParser
 
     web_result = ""
-    try:
-        search_query = _rewrite_for_search(message, history_text)
-        web_result = web_search.run(search_query)
-    except Exception as exc:  # pragma: no cover - network/tool failures are non-deterministic
-        web_result = f"(web search unavailable: {exc})"
+    search_agent = _ensure_web_search_agent()
+    if search_agent is None:
+        unavailable_reason = _web_search_error or "initialization failed"
+        web_result = f"(web search unavailable: {unavailable_reason})"
+    else:
+        try:
+            search_query = _rewrite_for_search(message, history_text)
+            web_result = search_agent.run(search_query)
+        except Exception as exc:  # pragma: no cover - network/tool failures are non-deterministic
+            web_result = f"(web search unavailable: {exc})"
 
     source_text = "\n".join(getattr(doc, "page_content", str(doc)) for doc in sources)
 
@@ -175,16 +221,77 @@ def respond(message, history):
 
 def main() -> None:
     """Launch an interactive query loop."""
-    
+    default_search = bool(settings.search_enabled)
 
-    gr.ChatInterface(
-        fn=respond,
-        title="LangChain Chat",
-        description="A minimal chat UI powered by LangChain. Swap in your own chain.",
-        textbox=gr.Textbox(placeholder="Ask me anything...", lines=2),
-        examples=["Summarize LangChain in 3 bullets.", "Give me a study plan for SQL basics."],
-        theme="default",
-    ).launch(server_name="0.0.0.0", server_port=int(os.environ.get("PORT", 7860)))
+    def _toggle_search(current: bool) -> tuple[bool, str]:
+        new_value = not current
+        status = f"**Web search:** {'ON' if new_value else 'OFF'}"
+        return new_value, status
+
+    def _add_user_message(message: str, history: list[tuple[str, str | None]]) -> tuple[str, list[tuple[str, str | None]]]:
+        if not message:
+            return "", history
+        updated = history + [(message, None)]
+        return "", updated
+
+    def _generate_bot_reply(history: list[tuple[str, str | None]], use_search: bool) -> list[tuple[str, str | None]]:
+        if not history:
+            return history
+        question, _ = history[-1]
+        prior = history[:-1]
+        answer = respond(question, prior, use_search)
+        history[-1] = (question, answer)
+        return history
+
+    with gr.Blocks(title="LangChain Chat", theme="default") as demo:
+        gr.Markdown("# LangChain Chat\nA minimal chat UI powered by LangChain. Swap in your own chain.")
+
+        search_state = gr.State(default_search)
+        status_display = gr.Markdown(f"**Web search:** {'ON' if default_search else 'OFF'}")
+        toggle_button = gr.Button("Toggle Web Search", variant="secondary")
+
+        chatbot = gr.Chatbot(height=400, label="Conversation")
+        with gr.Row():
+            user_input = gr.Textbox(placeholder="Ask me anything...", lines=2, scale=8)
+            send_button = gr.Button("Send", variant="primary", scale=1)
+        clear_button = gr.Button("Clear Conversation", variant="secondary")
+        gr.Examples(
+            examples=["Summarize LangChain in 3 bullets.", "Give me a study plan for SQL basics."],
+            inputs=user_input,
+        )
+
+        toggle_button.click(
+            _toggle_search,
+            inputs=search_state,
+            outputs=[search_state, status_display],
+            queue=False,
+        )
+
+        user_input.submit(
+            _add_user_message,
+            inputs=[user_input, chatbot],
+            outputs=[user_input, chatbot],
+            queue=False,
+        ).then(
+            _generate_bot_reply,
+            inputs=[chatbot, search_state],
+            outputs=chatbot,
+        )
+
+        send_button.click(
+            _add_user_message,
+            inputs=[user_input, chatbot],
+            outputs=[user_input, chatbot],
+            queue=False,
+        ).then(
+            _generate_bot_reply,
+            inputs=[chatbot, search_state],
+            outputs=chatbot,
+        )
+
+        clear_button.click(lambda: ([], ""), None, [chatbot, user_input], queue=False)
+
+    demo.launch(server_name="0.0.0.0", server_port=int(os.environ.get("PORT", 7860)))
 
 #    try:
 #        history: List[Tuple[str, str]] = []

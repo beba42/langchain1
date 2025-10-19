@@ -5,6 +5,7 @@ from typing import Sequence
 import warnings
 
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_core.documents import Document
 
 from langchain_app.config.settings import settings
 
@@ -38,10 +39,10 @@ def load_local_documents(pattern: str = "*.txt", encodings: Sequence[str] = ("ut
     return documents
 
 
-def chunk_documents(documents: list[str], chunk_size: int = 1000, chunk_overlap: int = 200) -> list[str]:
+def chunk_documents(documents: list[str], chunk_size: int = 1000, chunk_overlap: int = 200) -> list[Document]:
     """Chunk documents for embedding or retrieval workflows."""
     if not documents:
         return []
 
     splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-    return [chunk.page_content for chunk in splitter.create_documents(documents)]
+    return splitter.create_documents(documents)

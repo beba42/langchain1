@@ -8,3 +8,5 @@ pydantic-settings
 python-dotenv
 requests
 gradio
+rank-bm25
+ddgs
