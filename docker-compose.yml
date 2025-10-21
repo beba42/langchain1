@@ -1,0 +1,29 @@
+version: "3.9"
+
+services:
+  ollama:
+    build:
+      context: ./ollama
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+
+  chat:
+    build:
+      context: ./chat
+    container_name: langchain-chat
+    depends_on:
+      - ollama
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+      - LC_DATA_DIR=/data
+      - PORT=7860
+    ports:
+      - "7860:7860"
+    volumes:
+      - ./data:/data
+
+volumes:
+  ollama-data:

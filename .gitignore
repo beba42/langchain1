@@ -1,2 +1,2 @@
-langchain_app/data/*
-!langchain_app/data/README.md
+__pycache__/
+**/__pycache__/

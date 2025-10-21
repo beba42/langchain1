@@ -1,37 +1,52 @@
-# LangChain Local/Hybrid Agent Starter
+# LangChain Chat Stack
 
-This repository scaffolds a LangChain project that combines local document retrieval with optional web search.
+This top-level project bundles two containers:
+
+- `chat` — the LangChain Gradio application that serves the local document QA agent.
+- `ollama` — an Ollama server preloaded with `llama3.1:8b` and `nomic-embed-text`.
 
 ## Layout
 
-- `langchain_app/` — Python package that contains agents, tools, and configuration.
-- `langchain_app/data/` — Drop plain-text files here; the local agent will ingest them automatically.
-- `langchain_app/agents/` — Local document utilities and a DuckDuckGo-based web search agent.
-- `langchain_app/config/` — Centralised settings powered by Pydantic.
-- `langchain_app/tools/` — Placeholder for custom LangChain tools you add later.
-- `scripts/` — Runnable entry points (e.g. `run_local_agent.py`).
-- `tests/` — Pytest-based test suite scaffolding.
+- `chat/` — original Python project (see `chat/README.md` for details).
+- `ollama/` — Dockerfile that builds an Ollama image with required models.
+- `docker-compose.yml` — defines the multi-container stack.
+- `data/` — shared volume mounted into the chat container for document ingestion.
 
-## Getting Started
+## Prerequisites
 
-1. **Install dependencies**
+- Docker 24+ (or a recent Docker Desktop).
+- Enough disk space for Ollama models (~15 GB for the selected trio).
+
+## Usage
+
+1. **Build and start the stack**
    ```bash
-   python -m venv .venv
-   source .venv/bin/activate
-   pip install -r requirements.txt
+   docker compose up --build
    ```
-2. **Provide credentials**  
-   Copy `.env.example` to `.env` and fill in the required API keys (e.g. `OPENAI_API_KEY`).
-3. **Add local documents**  
-   Drop `.txt` files into `langchain_app/data/`.
-4. **Run the local agent**
+   The first run downloads the Ollama base image and pulls the models; expect several minutes.
+
+2. **Access the app**  
+   Visit `http://localhost:7860` to reach the Gradio UI.
+
+3. **Add documents**  
+   Drop `.txt` files into the top-level `data/` directory on the host. The folder is mounted at `/data` inside the chat container (and mapped to `LC_DATA_DIR`), so new files are available on restart.
+
+4. **Stop the stack**
    ```bash
-   python scripts/run_local_agent.py
+   docker compose down
    ```
 
-## Next Steps
+### Updating Models or Requirements
 
-- Connect additional LangChain tools (browsing, code execution, etc.) under `langchain_app/tools`.
-- Wire the agents into LangGraph or LangServe for more advanced orchestration.
-- Add CI/CD workflows before publishing to GitHub.
+- To pull additional Ollama models, add `ollama pull <model>` lines to `ollama/Dockerfile`, then rebuild with `docker compose build ollama`.
+- To change Python dependencies or app code, edit files under `chat/` and rebuild `docker compose build chat`.
 
+### Data Persistence
+
+- `data/` (mounted into `/data`) holds your knowledge base documents.
+- `ollama-data` named volume keeps Ollama’s downloaded models so they persist between container restarts.
+
+## Troubleshooting
+
+- If the chat service starts before Ollama finishes booting, `docker compose up` automatically restarts it once Ollama is ready.
+- Port conflicts: adjust the `ports` section in `docker-compose.yml`.
